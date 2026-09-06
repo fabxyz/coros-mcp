@@ -869,13 +869,19 @@ async def save_workout_template(
 
         Plain step:
         - name (str): step label, e.g. "10:00 Warm-up"
-        - duration_minutes (float) OR duration_meters (float): step length,
-          time-based or distance-based. Use duration_meters for a step that
-          should end at a real distance regardless of pace (e.g. "1000" for
-          a 1km rep) rather than an estimated time -- a duration_minutes
-          step ends after that much elapsed time even if actual pace made it
-          cover more or less than the intended distance. Exactly one of the
-          two is required.
+        - duration_minutes (float) OR duration_meters (float) OR duration_open
+          (bool True): step length. duration_minutes is time-based;
+          duration_meters ends at a real distance regardless of pace (e.g.
+          "1000" for a 1km rep) rather than an estimated time -- a
+          duration_minutes step ends after that much elapsed time even if
+          actual pace made it cover more or less than the intended distance.
+          duration_open has no clock or distance cap at all -- the step only
+          ends when the athlete presses the watch's lap button (useful for a
+          warm-up, cooldown, or inter-block rest whose real length varies:
+          waiting for the group, catching your breath, etc.). intensity_low/
+          intensity_high still apply to a duration_open step as a guide zone
+          shown on the watch, but never gate advancement. Exactly one of the
+          three is required.
         - intensity_low (int): lower intensity target (watts, BPM, etc. depending on intensity_type)
         - intensity_high (int): upper intensity target (0 = open-ended)
         Note: power_low_w / power_high_w are accepted as legacy aliases for intensity_low / intensity_high.

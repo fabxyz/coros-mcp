@@ -860,27 +860,43 @@ def _build_workout_program_payload(
         """Return the targetType/targetValue/intensityMultiplier fields for a
         step, plus its intensity values scaled to match.
 
-        Two mutually exclusive duration keys are supported:
+        Three mutually exclusive duration keys are supported:
           - duration_minutes: time-based (targetType=2, seconds, intensity
             values used as-is).
           - duration_meters: distance-based (targetType=5, meters x100 -- the
             same convention every other distance field in this API uses --
             intensityMultiplier=1000 with intensity values scaled x1000).
+          - duration_open: manual/lap-press (targetType=1, targetValue=0,
+            seconds=0). No clock or distance cap -- the step only ends when
+            the athlete presses lap. Intensity bounds are still allowed (shown
+            as a guide zone on the watch) but never gate advancement.
 
         The x1000 intensity scaling for distance steps and targetType=5 are
         not documented anywhere in Coros's API; confirmed by building a
         distance-type step in the Coros app itself and reading back the raw
-        values via /training/schedule/query. targetType=1 (a natural first
-        guess) is NOT distance -- it silently produces a zero-duration,
-        zero-distance step with no error.
+        values via /training/schedule/query. targetType=1/targetValue=0 was
+        first assumed to be a broken guess (see git history) -- it's actually
+        the wire encoding for an open/manual step, confirmed the same way: by
+        building a manual-duration step in the Coros app and reading back the
+        raw exercises via /training/program/query.
         """
         low = s.get("intensity_low", s.get("power_low_w", 0))
         high = s.get("intensity_high", s.get("power_high_w", 0))
-        if "duration_meters" in s and "duration_minutes" in s:
+        duration_keys = [k for k in ("duration_minutes", "duration_meters", "duration_open") if k in s]
+        if len(duration_keys) > 1:
             raise ValueError(
-                f"step {s.get('name', '<unnamed>')!r} must set either "
-                "duration_minutes or duration_meters, not both"
+                f"step {s.get('name', '<unnamed>')!r} must set exactly one of "
+                f"duration_minutes, duration_meters, duration_open -- got {duration_keys}"
             )
+        if s.get("duration_open"):
+            return {
+                "targetType": 1,
+                "targetValue": 0,
+                "intensityValue": low,
+                "intensityValueExtend": high,
+                "intensityMultiplier": 0,
+                "seconds": 0,
+            }
         if "duration_meters" in s:
             try:
                 meters = float(s["duration_meters"])
@@ -904,8 +920,8 @@ def _build_workout_program_payload(
             }
         if "duration_minutes" not in s:
             raise ValueError(
-                f"step {s.get('name', '<unnamed>')!r} needs duration_minutes "
-                "or duration_meters"
+                f"step {s.get('name', '<unnamed>')!r} needs duration_minutes, "
+                "duration_meters, or duration_open"
             )
         duration_s = int(s["duration_minutes"] * 60)
         return {

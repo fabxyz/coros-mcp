@@ -389,19 +389,19 @@ def test_distance_step_in_repeat_group():
     assert recovery["targetValue"] == 120
 
 
-def test_step_missing_both_duration_keys_raises():
-    with pytest.raises(ValueError, match="duration_minutes or duration_meters"):
+def test_step_missing_all_duration_keys_raises():
+    with pytest.raises(ValueError, match="duration_minutes, duration_meters, or duration_open"):
         _build_workout_program_payload(
             name="broken",
             steps=[{"name": "???", "intensity_low": 100, "intensity_high": 150}],
         )
 
 
-def test_step_with_both_duration_keys_raises():
-    """duration_minutes and duration_meters are mutually exclusive; a step
-    carrying both would be built as a distance step but counted in both
-    summary totals, so reject it outright."""
-    with pytest.raises(ValueError, match="not both"):
+def test_step_with_multiple_duration_keys_raises():
+    """duration_minutes, duration_meters, and duration_open are mutually
+    exclusive; a step carrying more than one would be ambiguous to build and
+    to summarize, so reject it outright."""
+    with pytest.raises(ValueError, match="exactly one of"):
         _build_workout_program_payload(
             name="broken",
             steps=[{
@@ -412,6 +412,75 @@ def test_step_with_both_duration_keys_raises():
                 "intensity_high": 245,
             }],
         )
+    with pytest.raises(ValueError, match="exactly one of"):
+        _build_workout_program_payload(
+            name="broken",
+            steps=[{"name": "???", "duration_minutes": 4, "duration_open": True}],
+        )
+
+
+def test_open_step_target_type_and_value():
+    """duration_open emits targetType=1, targetValue=0, seconds=0 -- no clock
+    or distance cap, the step only ends when the athlete presses lap.
+
+    Confirmed by building a manual/open step in the Coros app itself (a
+    workout literally named "flexible_lap_press") and reading back the raw
+    exercises via /training/program/query: the app emits exactly this
+    targetType/targetValue pair for a step with no duration cap. A prior
+    comment on this function claimed targetType=1 "silently produces a
+    zero-duration, zero-distance step with no error" and treated it as
+    unusable -- that zero *is* the open-step encoding, not a bug. Field-
+    tested on real hardware: the watch shows no countdown and waits for a
+    lap press before advancing."""
+    payload = _build_workout_program_payload(
+        name="open step test",
+        steps=[
+            {"name": "Warm-up", "duration_open": True, "intensity_low": 120, "intensity_high": 150},
+        ],
+    )
+    ex = payload["exercises"][0]
+    assert ex["targetType"] == 1
+    assert ex["targetValue"] == 0
+    assert ex["intensityMultiplier"] == 0
+    assert ex["intensityValue"] == 120  # unscaled, same as a time-based step
+    assert ex["intensityValueExtend"] == 150
+
+
+def test_open_step_does_not_contribute_to_estimated_time():
+    """An open step's real elapsed time is unknowable ahead of time (that's
+    the point), so it contributes 0 rather than a guess -- same convention
+    as a distance step."""
+    payload = _build_workout_program_payload(
+        name="mixed",
+        steps=[
+            {"name": "Warm-up", "duration_open": True},
+            {"name": "Tempo", "duration_minutes": 10, "intensity_low": 240, "intensity_high": 250},
+        ],
+    )
+    assert payload["estimatedTime"] == 10 * 60
+
+
+def test_open_step_in_repeat_group():
+    """duration_open works inside a repeat group's sub-steps too -- e.g. a
+    hill-repeat's recovery that's genuinely unspecified ("jog back down the
+    hill"), not just a policy choice to make it flexible."""
+    payload = _build_workout_program_payload(
+        name="hill repeats",
+        steps=[
+            {"repeat": 16, "steps": [
+                {"name": "Uphill", "duration_minutes": 25 / 60},
+                {"name": "Jog down", "duration_open": True},
+            ]},
+        ],
+    )
+    header, work, recovery = payload["exercises"][0], payload["exercises"][1], payload["exercises"][2]
+    # group header's targetValue is one iteration's seconds (open sub-step
+    # contributes 0): 25 + 0 = 25.
+    assert header["targetValue"] == 25
+    assert header["sets"] == 16
+    assert work["targetType"] == 2
+    assert recovery["targetType"] == 1
+    assert recovery["targetValue"] == 0
 
 
 def test_cycling_sport_and_intensity_types_propagate():
