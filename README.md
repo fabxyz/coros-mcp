@@ -304,7 +304,7 @@ List reusable workout templates saved in the Coros library.
 
 Returns: `workouts` (list), `count`
 
-Each entry includes: `id`, `name`, `sport_type`, `sport_name`, `estimated_time_seconds`, `exercise_count`, `exercises` (list of steps with `name`, `duration_seconds`, `intensity_low`, `intensity_high`, `sets`)
+Each entry includes: `id`, `name`, `sport_type`, `sport_name`, `estimated_time_seconds`, `exercise_count`, `exercises` (list of steps with `name`, `intensity_low`, `intensity_high`, `sets`, and exactly one duration key: `duration_seconds`, `distance_meters`, or `duration_open`)
 
 ### `save_workout_template`
 

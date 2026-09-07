@@ -808,8 +808,9 @@ async def list_workout_templates() -> dict:
     dict with keys: workouts (list), count
     Each entry contains: id, name, sport_type, sport_name,
     estimated_time_seconds, exercise_count, exercises (list of steps with
-    name, intensity_low, intensity_high, sets, and either duration_seconds
-    for time-based steps or distance_meters for distance-based steps)
+    name, intensity_low, intensity_high, sets, and exactly one duration key:
+    duration_seconds for time-based steps, distance_meters for distance-based
+    steps, or duration_open=True for open/lap-press steps)
     """
     auth = await _get_auth()
     if auth is None:
