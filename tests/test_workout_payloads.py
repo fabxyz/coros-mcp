@@ -389,19 +389,19 @@ def test_distance_step_in_repeat_group():
     assert recovery["targetValue"] == 120
 
 
-def test_step_missing_both_duration_keys_raises():
-    with pytest.raises(ValueError, match="duration_minutes or duration_meters"):
+def test_step_missing_all_duration_keys_raises():
+    with pytest.raises(ValueError, match="duration_minutes, duration_meters, or duration_open"):
         _build_workout_program_payload(
             name="broken",
             steps=[{"name": "???", "intensity_low": 100, "intensity_high": 150}],
         )
 
 
-def test_step_with_both_duration_keys_raises():
-    """duration_minutes and duration_meters are mutually exclusive; a step
-    carrying both would be built as a distance step but counted in both
-    summary totals, so reject it outright."""
-    with pytest.raises(ValueError, match="not both"):
+def test_step_with_multiple_duration_keys_raises():
+    """duration_minutes, duration_meters, and duration_open are mutually
+    exclusive; a step carrying more than one would be ambiguous to build and
+    to summarize, so reject it outright."""
+    with pytest.raises(ValueError, match="exactly one of"):
         _build_workout_program_payload(
             name="broken",
             steps=[{
@@ -412,6 +412,75 @@ def test_step_with_both_duration_keys_raises():
                 "intensity_high": 245,
             }],
         )
+    with pytest.raises(ValueError, match="exactly one of"):
+        _build_workout_program_payload(
+            name="broken",
+            steps=[{"name": "???", "duration_minutes": 4, "duration_open": True}],
+        )
+
+
+def test_open_step_target_type_and_value():
+    """duration_open emits targetType=1, targetValue=0, seconds=0 -- no clock
+    or distance cap, the step only ends when the athlete presses lap.
+
+    Confirmed by building a manual/open step in the Coros app itself (a
+    workout literally named "flexible_lap_press") and reading back the raw
+    exercises via /training/program/query: the app emits exactly this
+    targetType/targetValue pair for a step with no duration cap. A prior
+    comment on this function claimed targetType=1 "silently produces a
+    zero-duration, zero-distance step with no error" and treated it as
+    unusable -- that zero *is* the open-step encoding, not a bug. Field-
+    tested on real hardware: the watch shows no countdown and waits for a
+    lap press before advancing."""
+    payload = _build_workout_program_payload(
+        name="open step test",
+        steps=[
+            {"name": "Warm-up", "duration_open": True, "intensity_low": 120, "intensity_high": 150},
+        ],
+    )
+    ex = payload["exercises"][0]
+    assert ex["targetType"] == 1
+    assert ex["targetValue"] == 0
+    assert ex["intensityMultiplier"] == 0
+    assert ex["intensityValue"] == 120  # unscaled, same as a time-based step
+    assert ex["intensityValueExtend"] == 150
+
+
+def test_open_step_does_not_contribute_to_estimated_time():
+    """An open step's real elapsed time is unknowable ahead of time (that's
+    the point), so it contributes 0 rather than a guess -- same convention
+    as a distance step."""
+    payload = _build_workout_program_payload(
+        name="mixed",
+        steps=[
+            {"name": "Warm-up", "duration_open": True},
+            {"name": "Tempo", "duration_minutes": 10, "intensity_low": 240, "intensity_high": 250},
+        ],
+    )
+    assert payload["estimatedTime"] == 10 * 60
+
+
+def test_open_step_in_repeat_group():
+    """duration_open works inside a repeat group's sub-steps too -- e.g. a
+    hill-repeat's recovery that's genuinely unspecified ("jog back down the
+    hill"), not just a policy choice to make it flexible."""
+    payload = _build_workout_program_payload(
+        name="hill repeats",
+        steps=[
+            {"repeat": 16, "steps": [
+                {"name": "Uphill", "duration_minutes": 25 / 60},
+                {"name": "Jog down", "duration_open": True},
+            ]},
+        ],
+    )
+    header, work, recovery = payload["exercises"][0], payload["exercises"][1], payload["exercises"][2]
+    # group header's targetValue is one iteration's seconds (open sub-step
+    # contributes 0): 25 + 0 = 25.
+    assert header["targetValue"] == 25
+    assert header["sets"] == 16
+    assert work["targetType"] == 2
+    assert recovery["targetType"] == 1
+    assert recovery["targetValue"] == 0
 
 
 def test_cycling_sport_and_intensity_types_propagate():
@@ -987,3 +1056,73 @@ def test_parse_workout_time_step_unchanged():
     assert ex["duration_seconds"] == 1200
     assert ex["intensity_low"] == 240
     assert ex["intensity_high"] == 250
+
+
+def test_parse_workout_open_step_round_trips():
+    """An open step read back from the API must come back as duration_open,
+    not as a 0-second timed step.
+
+    Without this, list_workout_templates renders every open step as
+    duration_seconds=0 -- indistinguishable from a genuinely empty step -- and
+    an agent reading a template and writing it back silently drops the open
+    semantics (or "repairs" the apparent 0-minute step)."""
+    from coros_mcp.coros_api import _parse_workout
+
+    item = {
+        "id": 44,
+        "name": "flexible_lap_press",
+        "sportType": 1,
+        "exercises": [{
+            "name": "Warm-up",
+            "targetType": 1,
+            "targetValue": 0,
+            "intensityValue": 120,
+            "intensityValueExtend": 150,
+            "intensityMultiplier": 0,
+            "sets": 1,
+        }],
+    }
+    ex = _parse_workout(item)["exercises"][0]
+    assert ex["duration_open"] is True
+    assert "duration_seconds" not in ex
+    assert "distance_meters" not in ex
+    assert ex["intensity_low"] == 120
+    assert ex["intensity_high"] == 150
+
+
+def test_open_step_write_read_round_trip():
+    """What _build_workout_program_payload writes for an open step is what
+    _parse_workout reads back as an open step."""
+    from coros_mcp.coros_api import _parse_workout
+
+    payload = _build_workout_program_payload(
+        name="round trip",
+        steps=[{"name": "Warm-up", "duration_open": True, "intensity_low": 120, "intensity_high": 150}],
+    )
+    ex = _parse_workout({"id": 1, "name": "round trip", "sportType": 1, **payload})["exercises"][0]
+    assert ex["duration_open"] is True
+    assert "duration_seconds" not in ex
+
+
+def test_falsy_duration_open_is_ignored_not_an_error():
+    """`duration_open: False` on a timed step means "not open" -- a natural
+    thing for an LLM client to emit for a boolean field. Treating its mere
+    presence as a second duration key would reject a well-formed step."""
+    payload = _build_workout_program_payload(
+        name="not open",
+        steps=[{"name": "Tempo", "duration_minutes": 5, "duration_open": False,
+                "intensity_low": 240, "intensity_high": 250}],
+    )
+    ex = payload["exercises"][0]
+    assert ex["targetType"] == 2
+    assert ex["targetValue"] == 300
+
+
+def test_only_falsy_duration_open_raises_with_a_pointed_message():
+    """A step whose ONLY duration key is a falsy duration_open is still
+    invalid -- but the error must not read as if the key were absent."""
+    with pytest.raises(ValueError, match="must be True to mark an open step"):
+        _build_workout_program_payload(
+            name="broken",
+            steps=[{"name": "???", "duration_open": False}],
+        )

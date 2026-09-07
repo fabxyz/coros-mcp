@@ -180,9 +180,10 @@ def _summarize_steps(steps: list[dict]) -> tuple[float, float, int]:
     distance_meters_total only counts duration_meters steps -- a step's
     real elapsed time/distance isn't knowable from the other unit ahead of
     time, so each contributes 0 to the total it doesn't measure rather than
-    a guess. Check steps_count against len(steps), or see the mixed-duration
-    warning attached by _attach_mixed_duration_warning, if a workout mixes
-    both kinds and either total looks low.
+    a guess. duration_open steps contribute to NEITHER total (their length
+    is unknowable by construction -- they end on a lap press). Check
+    steps_count against len(steps), or see the warnings attached by
+    _attach_duration_warnings, if either total looks low.
     """
     total_minutes = 0.0
     distance_meters_total = 0.0
@@ -209,6 +210,14 @@ _MIXED_DURATION_WARNING = (
 )
 
 
+_OPEN_DURATION_WARNING = (
+    "This workout has {n} open step(s) (duration_open): they end when the "
+    "athlete presses lap, so their length is unknown ahead of time and is "
+    "counted in neither total_minutes nor distance_meters_total. The real "
+    "workout is longer than those totals report."
+)
+
+
 def _has_mixed_durations(steps: list[dict]) -> bool:
     """True if steps (including inside repeat groups) mix duration_minutes
     and duration_meters step types."""
@@ -224,16 +233,55 @@ def _has_mixed_durations(steps: list[dict]) -> bool:
     return has_minutes and has_meters
 
 
+def _append_warning(result: dict, text: str) -> dict:
+    """Add `text` to result['warning'], appending to any existing warning
+    rather than overwriting it."""
+    if "warning" in result:
+        result["warning"] = result["warning"] + " " + text
+    else:
+        result["warning"] = text
+    return result
+
+
 def _attach_mixed_duration_warning(result: dict, steps: list[dict]) -> dict:
     """Add (or append to) a top-level `warning` if steps mix time- and
     distance-based durations, so total_minutes/distance_meters_total aren't
     misread as covering the whole workout's length."""
     if _has_mixed_durations(steps):
-        if "warning" in result:
-            result["warning"] = result["warning"] + " " + _MIXED_DURATION_WARNING
-        else:
-            result["warning"] = _MIXED_DURATION_WARNING
+        _append_warning(result, _MIXED_DURATION_WARNING)
     return result
+
+
+def _count_open_steps(steps: list[dict]) -> int:
+    """Number of duration_open steps, counting each repetition of a step
+    inside a repeat group (that's how often it is actually performed)."""
+    count = 0
+    for s in steps:
+        if "repeat" in s:
+            count += s["repeat"] * sum(1 for sub in s["steps"] if sub.get("duration_open"))
+        elif s.get("duration_open"):
+            count += 1
+    return count
+
+
+def _attach_open_duration_warning(result: dict, steps: list[dict]) -> dict:
+    """Add (or append to) a top-level `warning` if any step is duration_open.
+
+    An open step ends on a lap press, so it contributes to neither
+    total_minutes nor distance_meters_total -- without this, a workout of
+    [open warm-up, 10min tempo] reports a bare total_minutes of 10.0 and an
+    agent relays "10-minute workout" to the user."""
+    open_count = _count_open_steps(steps)
+    if open_count:
+        _append_warning(result, _OPEN_DURATION_WARNING.format(n=open_count))
+    return result
+
+
+def _attach_duration_warnings(result: dict, steps: list[dict]) -> dict:
+    """Attach every duration-summary caveat that applies (mixed units, open
+    steps). Warnings are concatenated when more than one applies."""
+    _attach_mixed_duration_warning(result, steps)
+    return _attach_open_duration_warning(result, steps)
 
 
 # ---------------------------------------------------------------------------
@@ -760,8 +808,9 @@ async def list_workout_templates() -> dict:
     dict with keys: workouts (list), count
     Each entry contains: id, name, sport_type, sport_name,
     estimated_time_seconds, exercise_count, exercises (list of steps with
-    name, intensity_low, intensity_high, sets, and either duration_seconds
-    for time-based steps or distance_meters for distance-based steps)
+    name, intensity_low, intensity_high, sets, and exactly one duration key:
+    duration_seconds for time-based steps, distance_meters for distance-based
+    steps, or duration_open=True for open/lap-press steps)
     """
     auth = await _get_auth()
     if auth is None:
@@ -869,13 +918,23 @@ async def save_workout_template(
 
         Plain step:
         - name (str): step label, e.g. "10:00 Warm-up"
-        - duration_minutes (float) OR duration_meters (float): step length,
-          time-based or distance-based. Use duration_meters for a step that
-          should end at a real distance regardless of pace (e.g. "1000" for
-          a 1km rep) rather than an estimated time -- a duration_minutes
-          step ends after that much elapsed time even if actual pace made it
-          cover more or less than the intended distance. Exactly one of the
-          two is required.
+        - duration_minutes (float) OR duration_meters (float) OR duration_open
+          (bool True): step length. duration_minutes is time-based;
+          duration_meters ends at a real distance regardless of pace (e.g.
+          "1000" for a 1km rep) rather than an estimated time -- a
+          duration_minutes step ends after that much elapsed time even if
+          actual pace made it cover more or less than the intended distance.
+          duration_open has no clock or distance cap at all -- the step only
+          ends when the athlete presses the watch's lap button (useful for a
+          warm-up, cooldown, or inter-block rest whose real length varies:
+          waiting for the group, catching your breath, etc.). intensity_low/
+          intensity_high still apply to a duration_open step as a guide zone
+          shown on the watch, but never gate advancement. An open step's
+          length is unknowable ahead of time, so it counts toward neither
+          total_minutes nor distance_meters_total and the response carries a
+          'warning' saying so -- don't report those totals to the user as the
+          workout's full length. Exactly one of the three is required (a
+          falsy duration_open is ignored, not an error).
         - intensity_low (int): lower intensity target (watts, BPM, etc. depending on intensity_type)
         - intensity_high (int): upper intensity target (0 = open-ended)
         Note: power_low_w / power_high_w are accepted as legacy aliases for intensity_low / intensity_high.
@@ -898,6 +957,9 @@ async def save_workout_template(
         intensity_type=3), ends at a real 1000m regardless of actual pace:
         {"name": "1km @ 4:00/km", "duration_meters": 1000, "intensity_low": 235, "intensity_high": 245}
 
+        Open step -- no countdown, advances only on a lap press:
+        {"name": "Warm-up (lap when ready)", "duration_open": True, "intensity_low": 120, "intensity_high": 150}
+
     sport_type : int
         Sport type ID, in the ACTIVITY namespace (the same IDs list_activities
         returns). Default 2 = Indoor Cycling (indoor trainer).
@@ -916,7 +978,9 @@ async def save_workout_template(
     -------
     dict with keys: workout_id, name, total_minutes, distance_meters_total,
     steps_count, message, and optionally 'warning' if the workout mixes
-    time-based and distance-based steps (see _summarize_steps)
+    time-based and distance-based steps and/or contains duration_open steps,
+    either of which makes the totals understate the workout (see
+    _summarize_steps; warnings are concatenated if both apply)
     """
     auth = await _get_auth()
     if auth is None:
@@ -935,7 +999,7 @@ async def save_workout_template(
             "steps_count": steps_count,
             "message": "Workout created. Open Coros app → Workouts to sync to watch.",
         }
-        return _attach_mixed_duration_warning(result, steps)
+        return _attach_duration_warnings(result, steps)
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -1182,8 +1246,9 @@ async def schedule_workout(
     -------
     dict with keys: scheduled, name, happen_day, total_minutes,
     distance_meters_total, steps_count, response, and optionally 'warning'
-    if enrichment lookup failed and/or the workout mixes time-based and
-    distance-based steps (warnings are concatenated if both apply).
+    if enrichment lookup failed, the workout mixes time-based and
+    distance-based steps, and/or it contains duration_open steps whose
+    length no total can account for (warnings are concatenated).
 
     The 'response' dict contains the server-assigned identifiers needed to
     later remove this calendar entry: plan_id, id_in_plan, plan_program_id,
@@ -1221,7 +1286,7 @@ async def schedule_workout(
             },
             response,
         )
-        return _attach_mixed_duration_warning(result, steps)
+        return _attach_duration_warnings(result, steps)
     except Exception as exc:
         return {"error": str(exc), "scheduled": False}
 
