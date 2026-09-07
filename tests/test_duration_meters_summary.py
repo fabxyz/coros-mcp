@@ -7,11 +7,16 @@ Covers:
   3. _summarize_steps: steps_count unaffected by the new return value
   4. _has_mixed_durations: pure time / pure distance / actually mixed
   5. _attach_mixed_duration_warning: adds, no-ops, and appends-not-overwrites
+  6. duration_open steps: excluded from both totals, warned about, and
+     concatenated with the mixed-duration warning (review feedback on PR #59)
 """
 
 from coros_mcp.server import (
     _MIXED_DURATION_WARNING,
+    _OPEN_DURATION_WARNING,
+    _attach_duration_warnings,
     _attach_mixed_duration_warning,
+    _count_open_steps,
     _has_mixed_durations,
     _summarize_steps,
 )
@@ -150,3 +155,61 @@ def test_attach_mixed_duration_warning_appends_not_overwrites():
     steps = [{"duration_minutes": 10}, {"duration_meters": 1000}]
     result = _attach_mixed_duration_warning({"scheduled": True, "warning": "enrichment failed"}, steps)
     assert result["warning"] == "enrichment failed " + _MIXED_DURATION_WARNING
+
+
+# ---------------------------------------------------------------------------
+# 6. duration_open steps (review feedback on PR #59)
+# ---------------------------------------------------------------------------
+
+
+def test_summarize_steps_open_step_contributes_to_neither_total():
+    steps = [
+        {"name": "Warm-up", "duration_open": True},
+        {"name": "Tempo", "duration_minutes": 10},
+    ]
+    total_minutes, distance_meters_total, steps_count = _summarize_steps(steps)
+    assert total_minutes == 10
+    assert distance_meters_total == 0
+    assert steps_count == 2
+
+
+def test_count_open_steps_counts_each_repetition():
+    steps = [
+        {"name": "Warm-up", "duration_open": True},
+        {"repeat": 4, "steps": [
+            {"name": "Uphill", "duration_meters": 400},
+            {"name": "Jog down", "duration_open": True},
+        ]},
+    ]
+    assert _count_open_steps(steps) == 1 + 4
+
+
+def test_count_open_steps_ignores_falsy_flag():
+    assert _count_open_steps([{"duration_minutes": 10, "duration_open": False}]) == 0
+
+
+def test_open_duration_warning_attached_when_totals_understate():
+    """[open warm-up, 10min tempo] must not be reported as a bare
+    "10-minute workout" -- the open step's real length is unknowable."""
+    steps = [{"duration_open": True}, {"duration_minutes": 10}]
+    result = _attach_duration_warnings({"scheduled": True}, steps)
+    assert result["warning"] == _OPEN_DURATION_WARNING.format(n=1)
+
+
+def test_open_duration_warning_absent_without_open_steps():
+    result = _attach_duration_warnings({"scheduled": True}, [{"duration_minutes": 10}])
+    assert "warning" not in result
+
+
+def test_mixed_and_open_warnings_are_concatenated():
+    steps = [{"duration_open": True}, {"duration_minutes": 10}, {"duration_meters": 1000}]
+    result = _attach_duration_warnings({"scheduled": True}, steps)
+    assert result["warning"] == (
+        _MIXED_DURATION_WARNING + " " + _OPEN_DURATION_WARNING.format(n=1)
+    )
+
+
+def test_duration_warnings_append_to_an_existing_warning():
+    steps = [{"duration_open": True}]
+    result = _attach_duration_warnings({"scheduled": True, "warning": "enrichment failed"}, steps)
+    assert result["warning"] == "enrichment failed " + _OPEN_DURATION_WARNING.format(n=1)

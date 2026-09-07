@@ -1056,3 +1056,73 @@ def test_parse_workout_time_step_unchanged():
     assert ex["duration_seconds"] == 1200
     assert ex["intensity_low"] == 240
     assert ex["intensity_high"] == 250
+
+
+def test_parse_workout_open_step_round_trips():
+    """An open step read back from the API must come back as duration_open,
+    not as a 0-second timed step.
+
+    Without this, list_workout_templates renders every open step as
+    duration_seconds=0 -- indistinguishable from a genuinely empty step -- and
+    an agent reading a template and writing it back silently drops the open
+    semantics (or "repairs" the apparent 0-minute step)."""
+    from coros_mcp.coros_api import _parse_workout
+
+    item = {
+        "id": 44,
+        "name": "flexible_lap_press",
+        "sportType": 1,
+        "exercises": [{
+            "name": "Warm-up",
+            "targetType": 1,
+            "targetValue": 0,
+            "intensityValue": 120,
+            "intensityValueExtend": 150,
+            "intensityMultiplier": 0,
+            "sets": 1,
+        }],
+    }
+    ex = _parse_workout(item)["exercises"][0]
+    assert ex["duration_open"] is True
+    assert "duration_seconds" not in ex
+    assert "distance_meters" not in ex
+    assert ex["intensity_low"] == 120
+    assert ex["intensity_high"] == 150
+
+
+def test_open_step_write_read_round_trip():
+    """What _build_workout_program_payload writes for an open step is what
+    _parse_workout reads back as an open step."""
+    from coros_mcp.coros_api import _parse_workout
+
+    payload = _build_workout_program_payload(
+        name="round trip",
+        steps=[{"name": "Warm-up", "duration_open": True, "intensity_low": 120, "intensity_high": 150}],
+    )
+    ex = _parse_workout({"id": 1, "name": "round trip", "sportType": 1, **payload})["exercises"][0]
+    assert ex["duration_open"] is True
+    assert "duration_seconds" not in ex
+
+
+def test_falsy_duration_open_is_ignored_not_an_error():
+    """`duration_open: False` on a timed step means "not open" -- a natural
+    thing for an LLM client to emit for a boolean field. Treating its mere
+    presence as a second duration key would reject a well-formed step."""
+    payload = _build_workout_program_payload(
+        name="not open",
+        steps=[{"name": "Tempo", "duration_minutes": 5, "duration_open": False,
+                "intensity_low": 240, "intensity_high": 250}],
+    )
+    ex = payload["exercises"][0]
+    assert ex["targetType"] == 2
+    assert ex["targetValue"] == 300
+
+
+def test_only_falsy_duration_open_raises_with_a_pointed_message():
+    """A step whose ONLY duration key is a falsy duration_open is still
+    invalid -- but the error must not read as if the key were absent."""
+    with pytest.raises(ValueError, match="must be True to mark an open step"):
+        _build_workout_program_payload(
+            name="broken",
+            steps=[{"name": "???", "duration_open": False}],
+        )

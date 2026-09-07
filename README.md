@@ -345,7 +345,11 @@ Save a reusable cycling/intervals workout **template** to the Coros library. The
 }
 ```
 
-**Distance-based steps:** use `duration_meters` instead of `duration_minutes` for a step that should end at a real distance regardless of pace, e.g. `{"name": "1km @ 4:00/km", "duration_meters": 1000, "intensity_low": 235, "intensity_high": 245}` (pace in sec/km with `intensity_type: 3`). Exactly one of the two keys per step.
+**Distance-based steps:** use `duration_meters` instead of `duration_minutes` for a step that should end at a real distance regardless of pace, e.g. `{"name": "1km @ 4:00/km", "duration_meters": 1000, "intensity_low": 235, "intensity_high": 245}` (pace in sec/km with `intensity_type: 3`).
+
+**Open (lap-press) steps:** use `duration_open: true` for a step with no clock and no distance cap — the watch shows no countdown and advances only when the athlete presses lap, e.g. `{"name": "Warm-up", "duration_open": true, "intensity_low": 120, "intensity_high": 150}`. Intensity bounds still show as a guide zone but never end the step. Because an open step's length is unknowable ahead of time, it counts toward neither `total_minutes` nor `distance_meters_total`, and the response carries a `warning` saying so.
+
+Exactly one of the three keys (`duration_minutes`, `duration_meters`, `duration_open`) per step.
 
 `sport_type`: `2` = Indoor Cycling (default), `200` = Road Bike
 

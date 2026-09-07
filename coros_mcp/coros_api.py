@@ -92,13 +92,23 @@ class CorosAPIError(ValueError):
         self.code = code
 
 
+# Appended to 1019 ("access token invalid") errors: region is not geography,
+# and a login against the wrong region returns a valid-looking token that
+# 1019s on every subsequent call — worth ruling out before anything else.
+_REGION_HINT = (
+    " — if this persists right after a successful login, try the other "
+    "region (eu/us): an account's home shard need not match where you live."
+)
+
+
 def _check_response(body: dict, context: str) -> None:
     """Raise CorosAPIError if the Coros API response indicates an error."""
     if body.get("result") != "0000":
+        code = str(body.get("result"))
         raise CorosAPIError(
-            str(body.get("result")),
+            code,
             f"Coros {context} error: {body.get('message', 'unknown error')} "
-            f"(result={body.get('result')})",
+            f"(result={code})" + (_REGION_HINT if code == "1019" else ""),
         )
 
 
@@ -670,9 +680,10 @@ async def fetch_activity_detail(auth: StoredAuth, activity_id: str, sport_type: 
 # ---------------------------------------------------------------------------
 
 # sportType=2 = Indoor Cycling (indoor trainer); intensityType=6 = power in watts
-# targetType=2 = time-based (seconds); targetType=5 = distance-based (meters
-# x100, intensity values x1000 with intensityMultiplier=1000); exerciseType=2
-# = cycling block
+# targetType=1 = open/manual (targetValue=0 -- no cap, the step ends on a lap
+# press); targetType=2 = time-based (seconds); targetType=5 = distance-based
+# (meters x100, intensity values x1000 with intensityMultiplier=1000);
+# exerciseType=2 = cycling block
 # IntensityType values: 1=weight, 2=HR, 3=pace, 4=speed, 5=none, 6=power, 7=cadence
 
 # Note: the workout API uses sportType=1 for Running; the activity API uses
@@ -733,6 +744,12 @@ def _parse_workout(item: dict) -> dict:
             if ex.get("intensityMultiplier") == 1000:
                 parsed["intensity_low"] = _unscale(parsed["intensity_low"], 1000)
                 parsed["intensity_high"] = _unscale(parsed["intensity_high"], 1000)
+        elif ex.get("targetType") == 1:
+            # Open/manual step (see _target_fields): targetValue=0 means "no
+            # cap", not "zero seconds". Report it as duration_open so a
+            # read-modify-write round trip keeps the open semantics instead of
+            # silently rewriting the step as a 0-second timed one.
+            parsed["duration_open"] = True
         else:
             parsed["duration_seconds"] = ex.get("targetValue")
         exercises.append(parsed)
@@ -882,11 +899,30 @@ def _build_workout_program_payload(
         """
         low = s.get("intensity_low", s.get("power_low_w", 0))
         high = s.get("intensity_high", s.get("power_high_w", 0))
-        duration_keys = [k for k in ("duration_minutes", "duration_meters", "duration_open") if k in s]
+        # duration_open is a flag, so only a TRUTHY value counts as "set":
+        # a client that spells out `duration_open: False` on a timed step
+        # means "not open", not "two duration keys" -- rejecting that would
+        # be a hard error on a well-formed step.
+        duration_keys = [
+            k
+            for k in ("duration_minutes", "duration_meters", "duration_open")
+            if k in s and (k != "duration_open" or s[k])
+        ]
         if len(duration_keys) > 1:
             raise ValueError(
                 f"step {s.get('name', '<unnamed>')!r} must set exactly one of "
                 f"duration_minutes, duration_meters, duration_open -- got {duration_keys}"
+            )
+        if not duration_keys:
+            hint = (
+                " (duration_open is present but falsy -- it must be True to "
+                "mark an open step)"
+                if "duration_open" in s
+                else ""
+            )
+            raise ValueError(
+                f"step {s.get('name', '<unnamed>')!r} needs duration_minutes, "
+                f"duration_meters, or duration_open{hint}"
             )
         if s.get("duration_open"):
             return {
@@ -918,11 +954,6 @@ def _build_workout_program_payload(
                 "intensityMultiplier": 1000,
                 "seconds": 0,  # real elapsed time is unknown ahead of time
             }
-        if "duration_minutes" not in s:
-            raise ValueError(
-                f"step {s.get('name', '<unnamed>')!r} needs duration_minutes, "
-                "duration_meters, or duration_open"
-            )
         duration_s = int(s["duration_minutes"] * 60)
         return {
             "targetType": 2,
@@ -983,6 +1014,12 @@ def _build_workout_program_payload(
                 # iteration's meters x100) with correct derived distance/
                 # duration/load. Verified live 2026-08-12 by scheduling a
                 # 3x400m distance-only group and reading back the raw values.
+                # NOT yet verified live: a group whose iteration has neither
+                # time nor distance (every sub-step duration_open, or open +
+                # distance). Those also send targetValue=0 but give the
+                # server nothing to normalize the header to. Groups mixing an
+                # open sub-step with a TIMED one are fine -- the header still
+                # carries the timed sub-steps' seconds.
                 "targetType": 2,
                 "targetValue": iteration_seconds,
                 "sets": step["repeat"],
@@ -1143,7 +1180,9 @@ async def save_workout_template(
     Plain step:
       - name: str — step label (e.g. "10:00 Warm-up")
       - duration_minutes: float — step duration in minutes, OR
-        duration_meters: float — step distance in meters (exactly one of the two)
+        duration_meters: float — step distance in meters, OR
+        duration_open: True — no cap; the step ends when the athlete presses
+        lap on the watch (exactly one of the three)
       - intensity_low: int — lower intensity target (watts, BPM, etc. per intensity_type)
       - intensity_high: int — upper intensity target (0 = open-ended)
 
